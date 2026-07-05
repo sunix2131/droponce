@@ -1,0 +1,9 @@
+build/bin
+node_modules
+frontend/dist
+.DS_Store
+*.db
+*.db-*
+*.log
+.cloudpub-*.toml
+tools/cloudpub/
