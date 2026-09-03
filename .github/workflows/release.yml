@@ -15,7 +15,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          go-version: '1.26.6'
       - uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -23,8 +23,13 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
         working-directory: frontend
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev
       - run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.12.0
-      - run: wails build
+      - if: runner.os != 'Linux'
+        run: wails build
+      - if: runner.os == 'Linux'
+        run: wails build -tags webkit2_41
       - shell: bash
         run: |
           find build/bin -type f -maxdepth 2 -print0 | xargs -0 shasum -a 256 > checksums.txt
