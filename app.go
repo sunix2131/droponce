@@ -123,6 +123,9 @@ func (a *App) startup(ctx context.Context) {
 	a.settings = defaultSettings()
 	if raw, ok, err := service.GetSetting(ctx, "settings"); err == nil && ok {
 		_ = json.Unmarshal([]byte(raw), &a.settings)
+		// CloudPub credentials belong to the CLI configuration, not the
+		// application settings row. Do not revive values written by older builds.
+		a.settings.CloudPubToken = ""
 	}
 }
 
@@ -381,7 +384,9 @@ func defaultSettings() SettingsDto {
 }
 
 func (a *App) UpdateSettings(request SettingsDto) (SettingsDto, error) {
-	body, err := json.Marshal(request)
+	persisted := request
+	persisted.CloudPubToken = ""
+	body, err := json.Marshal(persisted)
 	if err != nil {
 		return SettingsDto{}, err
 	}

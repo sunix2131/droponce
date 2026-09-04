@@ -37,7 +37,9 @@ func (m *CloudPubManager) Start(ctx context.Context, token, transferID, target s
 	if err := exec.CommandContext(ctx, clo, "--conf", conf, "set", "token", strings.TrimSpace(token)).Run(); err != nil {
 		return "", fmt.Errorf("cloudpub token setup failed: %w", err)
 	}
-	_ = os.Chmod(conf, 0o600)
+	if err := os.Chmod(conf, 0o600); err != nil {
+		return "", fmt.Errorf("protect cloudpub configuration: %w", err)
+	}
 
 	cmd := exec.Command(clo, "--conf", conf, "--log-level", "info", "publish", "-n", "DropOnce "+shortID(transferID), "http", target)
 	stdout, err := cmd.StdoutPipe()

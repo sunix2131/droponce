@@ -1,37 +1,42 @@
-# DropOnce Security Notes
+# Security model
 
-DropOnce is designed for trusted local networks only. It should not be used on public Wi-Fi, guest networks, airports, cafes, or any network where unknown users may observe or reach the sender's device.
+DropOnce provides several transports, not one universal security boundary. The sender chooses the transport and therefore chooses which infrastructure must be trusted.
 
-The internet mode is different: it uses an explicit DropOnce relay chosen by the user. Do not use random open servers as relays. A relay can see and store the uploaded file in the current implementation, so use your own relay or a relay you trust.
+## Local network
 
-Security properties implemented in this repository:
+The local HTTP server accepts only an explicitly selected private IPv4 address in `10.0.0.0/8`, `172.16.0.0/12` or `192.168.0.0/16`. It refuses wildcard, loopback and public bindings. This prevents accidental public exposure but does not make an untrusted Wi-Fi network safe: anyone who obtains the link can request the file.
 
-- raw transfer tokens are generated with `crypto/rand`;
-- tokens are 32 bytes and encoded with base64 URL-safe encoding without padding;
-- SQLite stores only `SHA-256(token)`;
-- raw tokens are kept only in runtime memory;
-- active transfers are marked `ended_after_restart` on app startup;
-- HTTP routes are limited to `/d/{token}` and `/d/{token}/download`;
-- invalid, expired, cancelled, and consumed links return a generic `404`;
-- Range requests return `416`;
-- downloads use `Content-Disposition: attachment`;
-- receiver IP addresses are used only transiently in the in-memory rate limiter.
+Transfer tokens contain 32 random bytes from `crypto/rand`. SQLite stores their SHA-256 hashes; raw tokens remain in the process registry while a transfer is active. Invalid, expired, cancelled and consumed links all return a generic `404`.
 
-Internet relay properties:
+The server rejects range requests and serializes downloads for a local transfer. A completed response increments the counter only after the expected number of bytes has been written. The file's size and modification time are checked before and after streaming.
 
-- relay transfers use cryptographically random receiver and cancellation tokens;
-- relay files are stored with generated internal IDs, not original filesystem paths;
-- relay links expire and enforce a download limit;
-- `DELETE /v1/transfers/{id}?cancel_token=...` removes a relay transfer;
-- relay upload size is capped by `-max-upload-gb`;
-- relay uploads stream directly to storage instead of loading the whole file into memory;
-- Range requests return `416`.
+## CloudPub
 
-Direct P2P properties:
+CloudPub publishes the local HTTP endpoint through the external `clo` process. DropOnce requires an existing executable and does not download one at runtime.
 
-- sender and receiver generate X25519 keypairs per session;
-- QR tickets include a 32-byte pairing secret and expiry;
-- session keys are derived with HKDF-SHA256;
-- metadata and file chunks are encrypted with ChaCha20-Poly1305;
-- replayed encrypted frame counters are rejected by the receiver;
-- the broker relays encrypted messages in memory and does not store file blobs on disk.
+The token entered in DropOnce is kept in application memory rather than the SQLite settings row. Starting a tunnel passes it to `clo set token`; the resulting `cloudpub/config.toml` belongs to the CloudPub client and is chmodded to `0600`. CloudPub is part of the trusted transport for this mode and can observe connection metadata and relayed traffic.
+
+## Relay
+
+Relay transfers use independent random download and cancellation tokens. Uploaded files are written under generated IDs with mode `0600`, not under caller-provided paths. Filenames are sanitized before being used in HTTP headers.
+
+The relay stores plaintext file contents. It enforces expiry, a per-file size ceiling, download-count reservations and cleanup after cancellation or the final successful download. The built-in service has no accounts or global tenant quota, so an internet deployment needs authentication, rate limits and storage monitoring outside the process.
+
+## Direct
+
+A direct ticket contains the session ID, broker URL, sender public key, expiry and a 32-byte pairing secret. The receiver proves possession of that secret before the sender begins transferring data.
+
+Both sides generate ephemeral X25519 key pairs. They derive directional keys with HKDF-SHA256 and encrypt metadata, 256 KiB chunks and the final marker with ChaCha20-Poly1305. The frame type is authenticated as additional data. Counters must be strictly increasing, which rejects duplicates and reordering without retaining an unbounded replay set.
+
+The receiver accepts one metadata frame, enforces a 50 GiB declared-size ceiling, refuses data before metadata and verifies the exact byte count before completion. Partial output is deleted after protocol errors, expiry or cancellation.
+
+The broker sees session timing and encrypted frame sizes. It keeps frames in memory until session expiry and applies a configurable per-session byte budget. It does not authenticate operators or hide network metadata. Direct mode is therefore an encrypted broker bridge, not anonymous transport or peer-to-peer NAT traversal.
+
+## Out of scope
+
+- protection after an authorized receiver saves a file;
+- anonymity from the relay, broker, tunnel provider or network operator;
+- malware scanning of transferred content;
+- recovery of lost transfer tickets;
+- browser-based end-to-end encrypted transfer;
+- multi-tenant hardening for public relay or broker hosting.
