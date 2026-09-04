@@ -66,7 +66,7 @@ type Service struct {
 
 	directMu        sync.RWMutex
 	directOutgoing  map[string]*directOutgoingSession
-	directIncoming  map[string]*IncomingTransferDto
+	directIncoming  map[string]*directIncomingSession
 	directDownloads string
 }
 
@@ -80,7 +80,7 @@ func NewService(ctx context.Context, db *sql.DB, dbPath string) (*Service, error
 		dbPath:   dbPath,
 
 		directOutgoing:  map[string]*directOutgoingSession{},
-		directIncoming:  map[string]*IncomingTransferDto{},
+		directIncoming:  map[string]*directIncomingSession{},
 		directDownloads: defaultDirectDownloadDir(),
 	}
 	if err := s.repo.MarkRestarted(ctx, time.Now().UTC()); err != nil {

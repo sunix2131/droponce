@@ -24,7 +24,10 @@ import (
 	"droponce/internal/infrastructure/qr"
 )
 
-const directChunkSize = 256 * 1024
+const (
+	directChunkSize    = 256 * 1024
+	maxDirectFileBytes = int64(50 * 1024 * 1024 * 1024)
+)
 
 type CreateDirectTransferRequest struct {
 	SourcePath    string `json:"sourcePath"`
@@ -51,6 +54,11 @@ type directOutgoingSession struct {
 	transferID string
 	cancel     context.CancelFunc
 	status     atomic.Value
+}
+
+type directIncomingSession struct {
+	dto    *IncomingTransferDto
+	cancel context.CancelFunc
 }
 
 type directReceiverHello struct {
@@ -164,10 +172,14 @@ func (s *Service) AcceptDirectTransfer(ctx context.Context, ticketValue string) 
 		return IncomingTransferDto{}, err
 	}
 	dto := IncomingTransferDto{SessionID: ticket.SessionID, Status: "connecting", StartedAt: time.Now().UTC()}
+	receiveCtx, cancel := context.WithCancel(context.Background())
 	s.directMu.Lock()
-	s.directIncoming[ticket.SessionID] = &dto
+	if existing, ok := s.directIncoming[ticket.SessionID]; ok {
+		existing.cancel()
+	}
+	s.directIncoming[ticket.SessionID] = &directIncomingSession{dto: &dto, cancel: cancel}
 	s.directMu.Unlock()
-	go s.runDirectReceiver(context.Background(), ticket, brokerURL, keyPair)
+	go s.runDirectReceiver(receiveCtx, ticket, brokerURL, keyPair)
 	return dto, nil
 }
 
@@ -176,7 +188,7 @@ func (s *Service) ListIncomingTransfers() []IncomingTransferDto {
 	defer s.directMu.RUnlock()
 	out := make([]IncomingTransferDto, 0, len(s.directIncoming))
 	for _, item := range s.directIncoming {
-		out = append(out, *item)
+		out = append(out, *item.dto)
 	}
 	return out
 }
@@ -189,8 +201,9 @@ func (s *Service) CancelDirectSession(sessionID string) error {
 		delete(s.directOutgoing, sessionID)
 	}
 	if incoming, ok := s.directIncoming[sessionID]; ok {
-		incoming.Status = "cancelled"
-		incoming.CompletedAt = time.Now().UTC()
+		incoming.cancel()
+		incoming.dto.Status = "cancelled"
+		incoming.dto.CompletedAt = time.Now().UTC()
 	}
 	return nil
 }
@@ -276,27 +289,43 @@ func (s *Service) runDirectSender(ctx context.Context, tr transfer.Transfer, bro
 }
 
 func (s *Service) runDirectReceiver(ctx context.Context, ticket direct.Ticket, brokerURL string, keyPair direct.KeyPair) {
-	s2r, _, err := direct.DeriveKeys(keyPair.Private, ticket.SenderPublicKey, ticket.PairingSecret, ticket.SessionID)
-	if err != nil {
+	fail := func(err error) {
 		s.updateIncoming(ticket.SessionID, func(dto *IncomingTransferDto) {
+			if dto.Status == "cancelled" {
+				return
+			}
 			dto.Status = "failed"
 			dto.ErrorMessage = err.Error()
 			dto.CompletedAt = time.Now().UTC()
 		})
+	}
+	s2r, _, err := direct.DeriveKeys(keyPair.Private, ticket.SenderPublicKey, ticket.PairingSecret, ticket.SessionID)
+	if err != nil {
+		fail(err)
 		return
 	}
 	guard := direct.NewReplayGuard()
 	after := uint64(0)
 	var out *os.File
+	var outputPath string
+	var expectedSize int64
 	var received int64
+	completed := false
+	defer func() {
+		if out != nil {
+			_ = out.Close()
+		}
+		if !completed && outputPath != "" {
+			_ = os.Remove(outputPath)
+		}
+	}()
 	for time.Now().UTC().Before(ticket.ExpiresAt) {
 		messages, err := pollBrokerMessages(ctx, brokerURL, ticket.SessionID, "receiver", after)
 		if err != nil {
-			s.updateIncoming(ticket.SessionID, func(dto *IncomingTransferDto) {
-				dto.Status = "failed"
-				dto.ErrorMessage = err.Error()
-				dto.CompletedAt = time.Now().UTC()
-			})
+			if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
+				return
+			}
+			fail(err)
 			return
 		}
 		for _, msg := range messages {
@@ -308,37 +337,36 @@ func (s *Service) runDirectReceiver(ctx context.Context, ticket direct.Ticket, b
 			}
 			payload, plaintext, err := openEncrypted(s2r, guard, msg.Body)
 			if err != nil {
-				s.updateIncoming(ticket.SessionID, func(dto *IncomingTransferDto) {
-					dto.Status = "failed"
-					dto.ErrorMessage = err.Error()
-					dto.CompletedAt = time.Now().UTC()
-				})
+				fail(err)
 				return
 			}
 			switch payload.Kind {
 			case "metadata":
+				if out != nil {
+					fail(errors.New("duplicate direct transfer metadata"))
+					return
+				}
 				var meta directMetadata
 				if err := json.Unmarshal(plaintext, &meta); err != nil {
+					fail(fmt.Errorf("decode direct transfer metadata: %w", err))
+					return
+				}
+				if meta.Size < 0 || meta.Size > maxDirectFileBytes {
+					fail(fmt.Errorf("direct transfer size must be between 0 and %d bytes", maxDirectFileBytes))
 					return
 				}
 				path, err := s.prepareIncomingFile(meta.FileName)
 				if err != nil {
-					s.updateIncoming(ticket.SessionID, func(dto *IncomingTransferDto) {
-						dto.Status = "failed"
-						dto.ErrorMessage = err.Error()
-						dto.CompletedAt = time.Now().UTC()
-					})
+					fail(err)
 					return
 				}
 				out, err = os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 				if err != nil {
-					s.updateIncoming(ticket.SessionID, func(dto *IncomingTransferDto) {
-						dto.Status = "failed"
-						dto.ErrorMessage = err.Error()
-						dto.CompletedAt = time.Now().UTC()
-					})
+					fail(err)
 					return
 				}
+				outputPath = path
+				expectedSize = meta.Size
 				s.updateIncoming(ticket.SessionID, func(dto *IncomingTransferDto) {
 					dto.Status = "receiving"
 					dto.FileName = meta.FileName
@@ -347,31 +375,57 @@ func (s *Service) runDirectReceiver(ctx context.Context, ticket direct.Ticket, b
 				})
 			case "data":
 				if out == nil {
-					continue
+					fail(errors.New("received direct transfer data before metadata"))
+					return
+				}
+				if int64(len(plaintext)) > expectedSize-received {
+					fail(errors.New("direct transfer exceeded declared file size"))
+					return
 				}
 				n, err := out.Write(plaintext)
 				received += int64(n)
 				if err != nil {
-					_ = out.Close()
-					s.updateIncoming(ticket.SessionID, func(dto *IncomingTransferDto) {
-						dto.Status = "failed"
-						dto.ErrorMessage = err.Error()
-						dto.CompletedAt = time.Now().UTC()
-					})
+					fail(err)
+					return
+				}
+				if n != len(plaintext) {
+					fail(io.ErrShortWrite)
 					return
 				}
 				s.updateIncoming(ticket.SessionID, func(dto *IncomingTransferDto) {
 					dto.BytesReceived = received
 				})
 			case "done":
-				if out != nil {
-					_ = out.Close()
+				if out == nil {
+					fail(errors.New("received direct transfer completion before metadata"))
+					return
 				}
+				if string(plaintext) != "ok" {
+					fail(errors.New("invalid direct transfer completion marker"))
+					return
+				}
+				if received != expectedSize {
+					fail(fmt.Errorf("incomplete direct transfer: received %d of %d bytes", received, expectedSize))
+					return
+				}
+				if err := out.Sync(); err != nil {
+					fail(err)
+					return
+				}
+				if err := out.Close(); err != nil {
+					fail(err)
+					return
+				}
+				out = nil
+				completed = true
 				s.updateIncoming(ticket.SessionID, func(dto *IncomingTransferDto) {
 					dto.Status = "completed"
 					dto.BytesReceived = received
 					dto.CompletedAt = time.Now().UTC()
 				})
+				return
+			default:
+				fail(fmt.Errorf("unsupported direct transfer message type %q", payload.Kind))
 				return
 			}
 		}
@@ -391,8 +445,8 @@ func (s *Service) outgoing(sessionID string) *directOutgoingSession {
 func (s *Service) updateIncoming(sessionID string, fn func(*IncomingTransferDto)) {
 	s.directMu.Lock()
 	defer s.directMu.Unlock()
-	if dto, ok := s.directIncoming[sessionID]; ok {
-		fn(dto)
+	if incoming, ok := s.directIncoming[sessionID]; ok {
+		fn(incoming.dto)
 	}
 }
 
