@@ -144,21 +144,23 @@ func Open(key []byte, counter uint64, aad string, sealed string) ([]byte, error)
 }
 
 type ReplayGuard struct {
-	mu   sync.Mutex
-	seen map[uint64]struct{}
+	mu          sync.Mutex
+	lastCounter uint64
+	initialized bool
 }
 
 func NewReplayGuard() *ReplayGuard {
-	return &ReplayGuard{seen: map[uint64]struct{}{}}
+	return &ReplayGuard{}
 }
 
 func (g *ReplayGuard) Accept(counter uint64) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if _, ok := g.seen[counter]; ok {
-		return errors.New("direct frame replay detected")
+	if counter == 0 || g.initialized && counter <= g.lastCounter {
+		return errors.New("direct frame replay or reordering detected")
 	}
-	g.seen[counter] = struct{}{}
+	g.lastCounter = counter
+	g.initialized = true
 	return nil
 }
 

@@ -47,6 +47,9 @@ func TestSealOpenAndReplayGuard(t *testing.T) {
 	guard := NewReplayGuard()
 	require.NoError(t, guard.Accept(1))
 	require.Error(t, guard.Accept(1))
+	require.NoError(t, guard.Accept(3))
+	require.Error(t, guard.Accept(2))
+	require.Error(t, NewReplayGuard().Accept(0))
 }
 
 func TestTicketRoundTripAndExpiry(t *testing.T) {
