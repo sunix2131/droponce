@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -52,6 +53,28 @@ func TestRelayUploadDownloadAndConsume(t *testing.T) {
 	require.NoError(t, err)
 	defer again.Body.Close()
 	require.Equal(t, http.StatusNotFound, again.StatusCode)
+}
+
+func TestRelayReservesDownloadLimitAtomically(t *testing.T) {
+	server, err := New(t.TempDir(), "")
+	require.NoError(t, err)
+	server.items["transfer"] = &item{
+		ID:           "transfer",
+		Token:        "token",
+		Path:         t.TempDir() + "/file",
+		MaxDownloads: 1,
+		ExpiresAt:    time.Now().UTC().Add(time.Minute),
+	}
+
+	_, first := server.reserveDownload("transfer", "token")
+	_, concurrent := server.reserveDownload("transfer", "token")
+
+	require.True(t, first)
+	require.False(t, concurrent)
+
+	server.finishDownload("transfer", false)
+	_, retry := server.reserveDownload("transfer", "token")
+	require.True(t, retry)
 }
 
 func TestRelayRejectsFilesOverLimit(t *testing.T) {

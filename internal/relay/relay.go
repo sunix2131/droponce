@@ -41,6 +41,7 @@ type item struct {
 	Size               int64
 	MaxDownloads       int
 	CompletedDownloads int
+	ActiveDownloads    int
 	ExpiresAt          time.Time
 	CreatedAt          time.Time
 }
@@ -242,12 +243,12 @@ func (s *Server) receiver(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id, token := parts[0], parts[1]
-	it, ok := s.lookup(id, token)
-	if !ok {
-		notFound(w)
-		return
-	}
 	if len(parts) == 2 && r.Method == http.MethodGet {
+		it, ok := s.lookup(id, token)
+		if !ok {
+			notFound(w)
+			return
+		}
 		netinfra.SecurityHeaders(w, true)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_ = receiverweb.Render(w, receiverweb.PageData{
@@ -263,6 +264,11 @@ func (s *Server) receiver(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(parts) == 3 && parts[2] == "download" && r.Method == http.MethodGet {
+		it, ok := s.reserveDownload(id, token)
+		if !ok {
+			notFound(w)
+			return
+		}
 		s.download(w, r, it)
 		return
 	}
@@ -270,6 +276,8 @@ func (s *Server) receiver(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) download(w http.ResponseWriter, r *http.Request, it *item) {
+	success := false
+	defer func() { s.finishDownload(it.ID, success) }()
 	if r.Header.Get("Range") != "" {
 		netinfra.SecurityHeaders(w, false)
 		w.Header().Set("Accept-Ranges", "none")
@@ -291,23 +299,51 @@ func (s *Server) download(w http.ResponseWriter, r *http.Request, it *item) {
 	if _, err := io.Copy(w, counter); err != nil || counter.sent != it.Size {
 		return
 	}
+	success = true
+}
+
+func (s *Server) reserveDownload(id, token string) (*item, bool) {
 	s.mu.Lock()
-	current, ok := s.items[it.ID]
+	defer s.mu.Unlock()
+	it, ok := s.items[id]
+	if !ok || it.Token != token || !time.Now().UTC().Before(it.ExpiresAt) {
+		return nil, false
+	}
+	if it.CompletedDownloads+it.ActiveDownloads >= it.MaxDownloads {
+		return nil, false
+	}
+	it.ActiveDownloads++
+	copy := *it
+	return &copy, true
+}
+
+func (s *Server) finishDownload(id string, success bool) {
+	var removePath string
+	s.mu.Lock()
+	it, ok := s.items[id]
 	if ok {
-		current.CompletedDownloads++
-		if current.CompletedDownloads >= current.MaxDownloads {
-			delete(s.items, it.ID)
-			_ = os.Remove(current.Path)
+		if it.ActiveDownloads > 0 {
+			it.ActiveDownloads--
+		}
+		if success {
+			it.CompletedDownloads++
+			if it.CompletedDownloads >= it.MaxDownloads {
+				delete(s.items, id)
+				removePath = it.Path
+			}
 		}
 	}
 	s.mu.Unlock()
+	if removePath != "" {
+		_ = os.Remove(removePath)
+	}
 }
 
 func (s *Server) lookup(id, token string) (*item, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	it, ok := s.items[id]
-	if !ok || it.Token != token || !time.Now().UTC().Before(it.ExpiresAt) || it.CompletedDownloads >= it.MaxDownloads {
+	if !ok || it.Token != token || !time.Now().UTC().Before(it.ExpiresAt) || it.CompletedDownloads+it.ActiveDownloads >= it.MaxDownloads {
 		if ok && !time.Now().UTC().Before(it.ExpiresAt) {
 			delete(s.items, id)
 			_ = os.Remove(it.Path)
