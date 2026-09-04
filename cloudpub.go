@@ -1,19 +1,15 @@
 package main
 
 import (
-	"archive/tar"
 	"bufio"
-	"compress/gzip"
 	"context"
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -118,7 +114,12 @@ func scanCloudPub(reader io.Reader, output chan<- string) {
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 0, 4096), 1024*1024)
 	for scanner.Scan() {
-		output <- scanner.Text()
+		select {
+		case output <- scanner.Text():
+		default:
+			// Start stops consuming output after it receives the public URL.
+			// Keep draining the pipe so CloudPub cannot block on a full stderr/stdout buffer.
+		}
 	}
 }
 
@@ -148,81 +149,5 @@ func (m *CloudPubManager) ensureCLI(ctx context.Context) (string, error) {
 	if st, err := os.Stat(cloPath); err == nil && !st.IsDir() {
 		return cloPath, nil
 	}
-	if runtime.GOOS != "darwin" {
-		return "", errors.New("automatic CloudPub CLI install is implemented for macOS in this build")
-	}
-	arch := map[string]string{"amd64": "x86_64", "arm64": "aarch64"}[runtime.GOARCH]
-	if arch == "" {
-		return "", fmt.Errorf("unsupported macOS architecture: %s", runtime.GOARCH)
-	}
-	if err := os.MkdirAll(installDir, 0o700); err != nil {
-		return "", err
-	}
-	archivePath := filepath.Join(installDir, "clo.tar.gz")
-	downloadURL := fmt.Sprintf("https://cloudpub.ru/download/stable/clo-3.1.0-stable-macos-%s.tar.gz", arch)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, downloadURL, nil)
-	if err != nil {
-		return "", err
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("download CloudPub CLI: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("download CloudPub CLI: HTTP %d", resp.StatusCode)
-	}
-	out, err := os.OpenFile(archivePath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
-	if err != nil {
-		return "", err
-	}
-	if _, err := io.Copy(out, resp.Body); err != nil {
-		_ = out.Close()
-		return "", err
-	}
-	if err := out.Close(); err != nil {
-		return "", err
-	}
-	if err := extractClo(archivePath, installDir); err != nil {
-		return "", err
-	}
-	if err := os.Chmod(cloPath, 0o700); err != nil {
-		return "", err
-	}
-	return cloPath, nil
-}
-
-func extractClo(archivePath, installDir string) error {
-	file, err := os.Open(archivePath)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-	gz, err := gzip.NewReader(file)
-	if err != nil {
-		return err
-	}
-	defer gz.Close()
-	tr := tar.NewReader(gz)
-	for {
-		header, err := tr.Next()
-		if errors.Is(err, io.EOF) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		if filepath.Base(header.Name) != "clo" || header.Typeflag != tar.TypeReg {
-			continue
-		}
-		out, err := os.OpenFile(filepath.Join(installDir, "clo"), os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o700)
-		if err != nil {
-			return err
-		}
-		if _, err := io.Copy(out, tr); err != nil {
-			_ = out.Close()
-			return err
-		}
-		return out.Close()
-	}
+	return "", errors.New("CloudPub CLI 'clo' was not found; install it and add it to PATH")
 }
