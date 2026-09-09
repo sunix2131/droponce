@@ -5,8 +5,10 @@ import (
 	"database/sql"
 	"embed"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -20,7 +22,17 @@ func Open(ctx context.Context, dir string) (*sql.DB, string, error) {
 		return nil, "", err
 	}
 	path := filepath.Join(dir, "droponce.db")
-	db, err := sql.Open("sqlite", path)
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return nil, "", err
+	}
+	uriPath := filepath.ToSlash(absolute)
+	if !strings.HasPrefix(uriPath, "/") {
+		uriPath = "/" + uriPath
+	}
+	// PRAGMAs are applied by the driver to every connection, including replacements.
+	dsn := url.URL{Scheme: "file", Path: uriPath, RawQuery: "_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)"}
+	db, err := sql.Open("sqlite", dsn.String())
 	if err != nil {
 		return nil, "", err
 	}

@@ -1,6 +1,7 @@
 name: release
 
 on:
+  workflow_dispatch:
   push:
     tags:
       - "v*"
@@ -29,7 +30,9 @@ jobs:
         working-directory: frontend
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev
-      - run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.12.0
+      - name: Install matching Wails CLI
+        shell: bash
+        run: go install "github.com/wailsapp/wails/v2/cmd/wails@$(go list -m -f '{{.Version}}' github.com/wailsapp/wails/v2)"
       - if: runner.os != 'Linux'
         run: wails build
       - if: runner.os == 'Linux'

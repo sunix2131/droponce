@@ -47,10 +47,10 @@ More detail is in [docs/security.md](docs/security.md).
 
 ## Run from source
 
-Requirements are Go from `go.mod`, Node.js 24 or newer, Wails CLI 2.12 and the platform packages required by Wails.
+Requirements are Go from `go.mod`, Node.js 24 or newer, a matching Wails CLI and the platform packages required by Wails.
 
 ```bash
-go install github.com/wailsapp/wails/v2/cmd/wails@v2.12.0
+go install "github.com/wailsapp/wails/v2/cmd/wails@$(go list -m -f '{{.Version}}' github.com/wailsapp/wails/v2)"
 npm ci --prefix frontend
 wails dev
 ```
@@ -86,6 +86,8 @@ go run ./cmd/droponce-broker \
 
 These binaries do not include user accounts, quotas shared across sessions or an administration API. A public deployment therefore needs authentication and traffic limits at the reverse proxy or network edge.
 
+Relay link metadata is currently held in memory. Restarting the relay invalidates its links; previously uploaded blobs are not recovered or expired by the new process. Use a dedicated temporary storage directory and an operator-managed retention policy. Durable relay metadata and restart recovery are not implemented.
+
 ## Verification
 
 The repository check runs frontend compilation and tests, Go vet, Go tests and the race detector. It also runs `staticcheck` and `govulncheck` when they are installed.
@@ -94,7 +96,7 @@ The repository check runs frontend compilation and tests, Go vet, Go tests and t
 ./scripts/verify.sh
 ```
 
-GitHub Actions runs the same core checks on every push and pull request. Tags matching `v*` trigger Wails builds on macOS, Windows and Linux and publish the binaries as workflow artifacts.
+GitHub Actions runs the core checks and builds the Linux desktop binary on main pushes and pull requests. Tags matching `v*` trigger Wails builds on macOS, Windows and Linux and publish the binaries as workflow artifacts. These builds can also be started manually without creating a release tag.
 
 ## Layout
 
